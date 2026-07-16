@@ -320,7 +320,7 @@ def walk_from(case_year: str, case_type: str, start_seq: int):
 
         if result == "missing":
             consecutive_misses += 1
-            log_message(f" ❌ [{checked}] {case_year} {case_type} {case_seq} | NO Case data available")
+            log_message(f"❌ [{checked}] {case_year} {case_type} {case_seq} | NO Case data available")
             if consecutive_misses >= MAX_CONSECUTIVE_MISSES:
                 log_message(f"  -> hit {MAX_CONSECUTIVE_MISSES} consecutive misses, stopping.")
                 reached_end_now = True
@@ -329,7 +329,7 @@ def walk_from(case_year: str, case_type: str, start_seq: int):
             if result is not None:
                 save_to_sheet(ws, result, existing_case_numbers)
                 found += 1
-                log_message(f" ✅ [{checked}] {result['case_number']} | {result['type']} | {result['status']} | {result['date_filed']}")
+                log_message(f"✅ [{checked}] {result['case_number']} | {result['type']} | {result['status']} | {result['date_filed']}")
                 if result["type"] == "FORECLOSURES":
                     save_to_sheet(ws_forecl, result, existing_case_numbers_forecl)
         last_completed_seq = seq
