@@ -86,5 +86,8 @@ elif "CASE DETAIL" not in response.text.upper() and "CASE LISTING" not in respon
     print("WARNING: response doesn't look like a case result page - see case_search.html")
 
 soup = BeautifulSoup(response.text, "html.parser")
-case_summary = soup.select_one("section#case-summary-container tbody")
-print(case_summary.text)
+case_summary = soup.select_one("section#case-summary-container tbody tr")
+case_summary_td = case_summary.select("td")
+type_of_case = case_summary_td[2].text
+
+print(type_of_case)
