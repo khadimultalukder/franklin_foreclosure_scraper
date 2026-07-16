@@ -89,5 +89,10 @@ soup = BeautifulSoup(response.text, "html.parser")
 case_summary = soup.select_one("section#case-summary-container tbody tr")
 case_summary_td = case_summary.select("td")
 type_of_case = case_summary_td[2].text
+if type_of_case == "FORECLOSURES":
+    print("Deteact FORECLOSURES case")
+    case_number = case_summary_td[1].text
+    status = case_summary_td[3].text
+    date_filed = case_summary_td[4].text
 
-print(type_of_case)
+    print(f"{type_of_case} - {case_number} - {date_filed} - {status}")
