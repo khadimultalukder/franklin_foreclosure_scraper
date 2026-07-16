@@ -3,6 +3,7 @@ config/service_account.json
 
 # Runtime state (not needed in the repo, regenerated automatically)
 config/last_run.json
+config/state.jsonl
 scraper/_runtime/
 
 # Python
