@@ -214,8 +214,8 @@ def parse_case(html: str):
         return "missing"
 
     type_of_case = tds[2].text.strip()
-    if type_of_case != "FORECLOSURES":
-        return None
+    # if type_of_case != "FORECLOSURES":
+    #     return None
 
     case_number = tds[1].text.strip()
     status = tds[3].text.strip()
