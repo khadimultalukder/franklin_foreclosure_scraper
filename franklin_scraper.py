@@ -114,15 +114,15 @@ def search_case(case_year: str, case_type: str, case_seq: str):
     type_of_case = case_summary_td[2].text
     if type_of_case == "FORECLOSURES":
         print("Detected FORECLOSURES case")
-        case_number = case_summary_td[1].text
-        status = case_summary_td[3].text
-        date_filed = case_summary_td[4].text
+        case_number = case_summary_td[1].text.strip()
+        status = case_summary_td[3].text.strip()
+        date_filed = case_summary_td[4].text.strip()
 
         plaintiff_element = soup.select_one("tbody#plaintiff-body tr")
-        plaintiff_name = plaintiff_element.select("td")[1].text
+        plaintiff_name = plaintiff_element.select("td")[1].text.strip()
 
         defendant_element = soup.select_one("tbody#defendant-body tr")
-        defendant_name = defendant_element.select("td")[1].text
+        defendant_name = defendant_element.select("td")[1].text.strip()
 
 
         print(f"{type_of_case} - {case_number} - {status} - {date_filed} - {plaintiff_name} - {defendant_name}")
