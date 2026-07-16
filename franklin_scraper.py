@@ -117,12 +117,20 @@ def search_case(case_year: str, case_type: str, case_seq: str):
         case_number = case_summary_td[1].text
         status = case_summary_td[3].text
         date_filed = case_summary_td[4].text
-        print(f"{type_of_case} - {case_number} - {date_filed} - {status}")
+
+        plaintiff_element = soup.select_one("tbody#plaintiff-body tr")
+        plaintiff_name = plaintiff_element.select("td")[1].text
+
+        defendant_element = soup.select_one("tbody#defendant-body tr")
+        defendant_name = defendant_element.select("td")[1].text
+
+
+        print(f"{type_of_case} - {case_number} - {status} - {date_filed} - {plaintiff_name} - {defendant_name}")
         return {
             "type": type_of_case,
             "case_number": case_number,
-            "date_filed": date_filed,
             "status": status,
+            "date_filed": date_filed,
         }
     else:
         print("No FORECLOSURES case")
