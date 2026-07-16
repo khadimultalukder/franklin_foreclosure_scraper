@@ -335,7 +335,7 @@ def walk_from(case_year: str, case_type: str, start_seq: int):
                 # instead of silently losing this foreclosure
                 save_to_sheet(ws, result, existing_case_numbers)
                 found += 1
-                print(f"[{checked}] FORECLOSURE: {result['case_number']} - {result['plaintiff_name']} v {result['defendant_name']}")
+                log_message(f"[{checked}] {result['case_number']} | {result['type']} | {result['status']} | {result['date_filed']} | {result['case_number']} | {result['plaintiff_name']} | {result['defendant_name']}")
 
                 # NEW: additionally mirror into the FORECLOSURES-only tab,
                 # but only when the case's actual type_of_case is
