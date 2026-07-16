@@ -18,9 +18,12 @@ Requires: pip install gspread google-auth
 Uses the service account key at config/service_account.json -- make sure
 that service account's email is shared as an Editor on the target Sheet.
 """
+import json
+import os
 import re
 import sys
 import time
+from datetime import datetime, timezone
 import requests
 from bs4 import BeautifulSoup
 import gspread
@@ -57,6 +60,54 @@ SHEET_HEADERS = [
 REQUEST_DELAY_SECONDS = 1.0
 MAX_RETRIES = 3
 RETRY_BACKOFF_SECONDS = 5
+
+# high-water-mark tracking -- one line appended per run, so 2nd+ runs skip
+# whatever the previous run(s) already covered instead of re-walking from
+# startSeq every time
+STATE_FILE = "config/state.jsonl"
+
+
+def load_high_water_mark(case_year: str, case_type: str):
+    """Return the caseSeq to resume from (last recorded last_seq + 1) for
+    this case_year/case_type, or None if there's no prior run yet."""
+    if not os.path.isfile(STATE_FILE):
+        return None
+
+    last_record = None
+    with open(STATE_FILE, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if record.get("case_year") == case_year and record.get("case_type") == case_type:
+                last_record = record
+
+    if last_record is None:
+        return None
+    return last_record["last_seq"] + 1
+
+
+def append_run_state(case_year: str, case_type: str, last_seq: int, checked: int, found: int, stop_reason: str):
+    """Append one line recording how far this run actually got. last_seq is
+    the highest caseSeq that was SUCCESSFULLY checked (a request failure
+    does not count -- that case gets retried on the next run)."""
+    os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)
+    record = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "case_year": case_year,
+        "case_type": case_type,
+        "last_seq": last_seq,
+        "checked": checked,
+        "found": found,
+        "stop_reason": stop_reason,
+    }
+    with open(STATE_FILE, "a", encoding="utf-8") as f:
+        f.write(json.dumps(record) + "\n")
+    print(f"  -> state saved: last_seq={last_seq} ({stop_reason})")
 
 
 def build_payload(case_year: str, case_type: str, case_seq: str) -> dict:
@@ -213,7 +264,19 @@ def walk_from(case_year: str, case_type: str, start_seq: int):
     One session reused for the whole run. Individual case numbers can be
     gaps (sealed/missing) even while later numbers still have data, so this
     only stops once MAX_CONSECUTIVE_MISSES in a row come back empty -- any
-    hit in between resets the miss counter."""
+    hit in between resets the miss counter.
+
+    Resumes from the high-water mark in STATE_FILE if one exists for this
+    case_year/case_type -- startSeq is only used on the very first run."""
+    resume_seq = load_high_water_mark(case_year, case_type)
+    if resume_seq is not None:
+        print(f"Resuming from high-water mark: {case_year} {case_type} {str(resume_seq).zfill(6)} "
+              f"(ignoring startSeq={start_seq})")
+        seq = resume_seq
+    else:
+        print(f"No prior state found -- starting fresh from {case_year} {case_type} {str(start_seq).zfill(6)}")
+        seq = start_seq
+
     session = start_session()
     ws = get_worksheet()
     print(f"Writing to Google Sheet '{ws.spreadsheet.title}' / tab '{ws.title}'")
@@ -221,7 +284,8 @@ def walk_from(case_year: str, case_type: str, start_seq: int):
     found = 0
     checked = 0
     consecutive_misses = 0
-    seq = start_seq
+    last_completed_seq = seq - 1  # nothing successfully checked yet
+    stop_reason = "reached_end"
 
     while True:
         case_seq = str(seq).zfill(6)
@@ -230,16 +294,22 @@ def walk_from(case_year: str, case_type: str, start_seq: int):
 
         html = fetch_case(session, case_year, case_type, case_seq)
         if html is None:
-            # request itself failed after retries -- stop here, don't guess
+            # request itself failed after retries -- stop here, and don't
+            # advance the high-water mark past this case, so next run
+            # retries it instead of silently skipping it
             print("  -> request kept failing, stopping.")
+            stop_reason = "request_failed"
             break
 
         result = parse_case(html)
+        last_completed_seq = seq
+
         if result == "missing":
             consecutive_misses += 1
             print(f"  -> no case_number came back ({consecutive_misses}/{MAX_CONSECUTIVE_MISSES} consecutive misses)")
             if consecutive_misses >= MAX_CONSECUTIVE_MISSES:
                 print(f"  -> hit {MAX_CONSECUTIVE_MISSES} consecutive misses, stopping.")
+                stop_reason = "reached_end"
                 break
         else:
             consecutive_misses = 0
@@ -253,14 +323,16 @@ def walk_from(case_year: str, case_type: str, start_seq: int):
         seq += 1
         time.sleep(REQUEST_DELAY_SECONDS)
 
-    print(f"\nDone. Checked {checked} cases, stopped at {case_year} {case_type} {str(seq).zfill(6)}, {found} foreclosures found.")
+    append_run_state(case_year, case_type, last_completed_seq, checked, found, stop_reason)
+    print(f"\nDone. Checked {checked} cases, {found} foreclosures found. "
+          f"High-water mark now at {case_year} {case_type} {str(last_completed_seq).zfill(6)}.")
     return found
 
 
 if __name__ == "__main__":
-    # only these need to change per run
     caseYear = "26"
     caseType = "CV"
-    startSeq = 5510   # e.g. 005510
+    startSeq = 5510   # e.g. 005510 -- only used on the very first run;
+                      # after that, config/state.jsonl's high-water mark wins
 
     walk_from(caseYear, caseType, startSeq)
