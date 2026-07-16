@@ -4,22 +4,27 @@ Separate from franklin_scraper.py (that script is untouched).
 
 Starting from a single caseSeq you provide, walks forward one case at a time
 (005510, 005511, 005512, ...) under one caseYear/caseType, and appends any
-FORECLOSURES cases found to a CSV. Stops as soon as a case number comes back
-empty (no case_number on the page) -- that's treated as "reached the end."
+FORECLOSURES cases found to a Google Sheet (append-only, never overwrites
+existing rows). Stops once MAX_CONSECUTIVE_MISSES case numbers in a row come
+back empty -- that's treated as "reached the end."
 
 Handles:
   - one session/cookie jar reused across the whole run (only 1 disclaimer
     accept + only 1 "GET home" needed, not per-case)
   - polite rate limiting between requests
   - retry with backoff on timeout / connection errors
+
+Requires: pip install gspread google-auth
+Uses the service account key at config/service_account.json -- make sure
+that service account's email is shared as an Editor on the target Sheet.
 """
-import csv
-import os
 import re
 import sys
 import time
 import requests
 from bs4 import BeautifulSoup
+import gspread
+from google.oauth2.service_account import Credentials
 
 BASE = "https://fcdcfcjs.co.franklin.oh.us/CaseInformationOnline/"
 SEARCH_URL = "https://fcdcfcjs.co.franklin.oh.us/CaseInformationOnline/caseSearch"
@@ -37,8 +42,16 @@ COMMON_HEADERS = {
     'user-agent': USER_AGENT,
 }
 
-CSV_PATH = "results.csv"
-CSV_FIELDS = ["case_number", "type", "status", "date_filed", "plaintiff_name", "defendant_name"]
+SERVICE_ACCOUNT_FILE = "config/service_account.json"
+SHEET_ID = "1W-kAWOk4-sf_RZfih3EeFJ5_Fzte1hVvEIA9OOsKf68"
+SHEET_TAB = "Sheet1"
+SHEET_SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
+
+# order matches the client's required column order
+SHEET_HEADERS = [
+    "Case Number", "Type of Case", "Status", "Date Filed",
+    "Defendant Name", "Plaintiff Name", "Case Link",
+]
 
 # be polite to an old government server
 REQUEST_DELAY_SECONDS = 1.0
@@ -165,14 +178,31 @@ def parse_case(html: str):
     }
 
 
-def save_to_csv(row: dict, path: str = CSV_PATH):
-    file_exists = os.path.isfile(path)
-    with open(path, "a", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=CSV_FIELDS)
-        if not file_exists:
-            writer.writeheader()
-        writer.writerow(row)
-    print(f"  -> saved to {path}")
+def get_worksheet():
+    creds = Credentials.from_service_account_file(SERVICE_ACCOUNT_FILE, scopes=SHEET_SCOPES)
+    gc = gspread.authorize(creds)
+    sh = gc.open_by_key(SHEET_ID)
+    ws = sh.worksheet(SHEET_TAB)
+    if not ws.row_values(1):
+        ws.append_row(SHEET_HEADERS, value_input_option="RAW")
+    return ws
+
+
+def save_to_sheet(ws, row: dict):
+    """gspread's append_row() calls the Sheets API values.append endpoint,
+    which always inserts after the last row with data -- it cannot overwrite
+    existing rows."""
+    values = [
+        row["case_number"],
+        row["type"],
+        row["status"],
+        row["date_filed"],
+        row["defendant_name"],
+        row["plaintiff_name"],
+        row["case_number"],  # Case Link -- site has no stable permalink, case number doubles as the link/ID
+    ]
+    ws.append_row(values, value_input_option="RAW")
+    print("  -> appended to Google Sheet")
 
 
 MAX_CONSECUTIVE_MISSES = 10
@@ -185,6 +215,8 @@ def walk_from(case_year: str, case_type: str, start_seq: int):
     only stops once MAX_CONSECUTIVE_MISSES in a row come back empty -- any
     hit in between resets the miss counter."""
     session = start_session()
+    ws = get_worksheet()
+    print(f"Writing to Google Sheet '{ws.spreadsheet.title}' / tab '{ws.title}'")
 
     found = 0
     checked = 0
@@ -216,7 +248,7 @@ def walk_from(case_year: str, case_type: str, start_seq: int):
             else:
                 found += 1
                 print(f"  -> FORECLOSURE: {result['case_number']} - {result['plaintiff_name']} v {result['defendant_name']}")
-                save_to_csv(result)
+                save_to_sheet(ws, result)
 
         seq += 1
         time.sleep(REQUEST_DELAY_SECONDS)
