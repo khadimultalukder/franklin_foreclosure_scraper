@@ -217,6 +217,6 @@ if __name__ == "__main__":
     caseYear = "26"
     caseType = "CV"
     startSeq = 5510   # e.g. 005510
-    endSeq = 5520     # e.g. 005520 (inclusive)
+    endSeq = 5600     # e.g. 005520 (inclusive)
 
     walk_range(caseYear, caseType, startSeq, endSeq)
