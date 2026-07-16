@@ -53,7 +53,7 @@ SHEET_SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 # order matches the client's required column order
 SHEET_HEADERS = [
     "Case Number", "Type of Case", "Status", "Date Filed",
-    "Defendant Name", "Plaintiff Name", "Case Link",
+    "Defendant Name", "Plaintiff Name", "Case ID",
 ]
 
 # be polite to an old government server
