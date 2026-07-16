@@ -53,7 +53,7 @@ SHEET_SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 # order matches the client's required column order
 SHEET_HEADERS = [
     "Case Number", "Type of Case", "Status", "Date Filed",
-    "Defendant Name", "Plaintiff Name", "Case ID",
+    "Defendant Name", "Plaintiff Name", "Case ID/Link",
 ]
 
 # be polite to an old government server
@@ -91,15 +91,24 @@ def load_high_water_mark(case_year: str, case_type: str):
     return last_record["last_seq"] + 1
 
 
-def append_run_state(case_year: str, case_type: str, last_seq: int, checked: int, found: int, stop_reason: str):
-    """Append one line recording how far this run actually got. last_seq is
-    the highest caseSeq that was SUCCESSFULLY checked (a request failure
-    does not count -- that case gets retried on the next run)."""
+def append_run_state(case_year: str, case_type: str, last_seq: int, checked: int, found: int,
+                      stop_reason: str, case_seq: str = None, result: str = None):
+    """Append one line recording state. last_seq is the highest caseSeq that
+    was SUCCESSFULLY checked (a request failure does not count -- that case
+    gets retried on the next run).
+
+    Called once per individual case checked (case_seq/result identify which
+    case and what happened), plus once more at the end/on crash for the
+    final stop_reason. Every checked caseSeq shows up in this file even
+    though most aren't foreclosures -- the sheet only gets the foreclosures,
+    this jsonl is the full audit trail of everything that was checked."""
     os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)
     record = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "case_year": case_year,
         "case_type": case_type,
+        "case_seq": case_seq,
+        "result": result,
         "last_seq": last_seq,
         "checked": checked,
         "found": found,
@@ -239,10 +248,25 @@ def get_worksheet():
     return ws
 
 
-def save_to_sheet(ws, row: dict):
+def get_existing_case_numbers(ws) -> set:
+    """Read the whole 'Case Number' column (col A) so we can skip re-adding
+    a case that's already in the sheet. This is what actually prevents
+    duplicates -- state.jsonl's checkpoint can only ever be an approximation
+    (an abrupt crash/kill can happen between a checkpoint and the next one),
+    so the sheet itself is the source of truth for "did I already write this
+    case."""
+    col_a = ws.col_values(1)  # includes the header row
+    return set(col_a[1:]) if col_a else set()
+
+
+def save_to_sheet(ws, row: dict, existing_case_numbers: set):
     """gspread's append_row() calls the Sheets API values.append endpoint,
     which always inserts after the last row with data -- it cannot overwrite
-    existing rows."""
+    existing rows. Skips writing if this case_number is already present."""
+    if row["case_number"] in existing_case_numbers:
+        print(f"  -> {row['case_number']} already in the sheet, skipping (dup guard)")
+        return
+
     values = [
         row["case_number"],
         row["type"],
@@ -250,14 +274,14 @@ def save_to_sheet(ws, row: dict):
         row["date_filed"],
         row["defendant_name"],
         row["plaintiff_name"],
-        row["case_number"],  # Case Link -- site has no stable permalink, case number doubles as the link/ID
+        row["case_number"],  # Case ID/Link -- site has no stable permalink, case number doubles as the ID/link
     ]
     ws.append_row(values, value_input_option="RAW")
+    existing_case_numbers.add(row["case_number"])
     print("  -> appended to Google Sheet")
 
 
 MAX_CONSECUTIVE_MISSES = 10
-CHECKPOINT_EVERY = 20  # write a state.jsonl checkpoint every N cases, not just at the end
 
 
 def walk_from(case_year: str, case_type: str, start_seq: int):
@@ -280,18 +304,22 @@ def walk_from(case_year: str, case_type: str, start_seq: int):
 
     session = start_session()
     ws = get_worksheet()
-    print(f"Writing to Google Sheet '{ws.spreadsheet.title}' / tab '{ws.title}'")
+    existing_case_numbers = get_existing_case_numbers(ws)
+    print(f"Writing to Google Sheet '{ws.spreadsheet.title}' / tab '{ws.title}' "
+          f"({len(existing_case_numbers)} case(s) already in it)")
 
     found = 0
     checked = 0
     consecutive_misses = 0
     last_completed_seq = seq - 1  # nothing successfully checked yet
     stop_reason = "reached_end"
+    state_logged_for_current_seq = True  # nothing pending yet
 
     try:
         while True:
             case_seq = str(seq).zfill(6)
             checked += 1
+            state_logged_for_current_seq = False
             print(f"[{checked}] checking {case_year} {case_type} {case_seq} ...")
 
             html = fetch_case(session, case_year, case_type, case_seq)
@@ -304,28 +332,45 @@ def walk_from(case_year: str, case_type: str, start_seq: int):
                 break
 
             result = parse_case(html)
-            last_completed_seq = seq
+            reached_end_now = False
 
             if result == "missing":
+                result_label = "missing"
                 consecutive_misses += 1
                 print(f"  -> no case_number came back ({consecutive_misses}/{MAX_CONSECUTIVE_MISSES} consecutive misses)")
                 if consecutive_misses >= MAX_CONSECUTIVE_MISSES:
                     print(f"  -> hit {MAX_CONSECUTIVE_MISSES} consecutive misses, stopping.")
                     stop_reason = "reached_end"
-                    break
+                    reached_end_now = True
             else:
                 consecutive_misses = 0
                 if result is None:
+                    result_label = "not_foreclosure"
                     print("  -> not a foreclosure")
                 else:
+                    result_label = "foreclosure"
+                    # only counts as found/complete once the sheet write itself
+                    # succeeds -- if this throws, last_completed_seq must NOT
+                    # advance past this case, so a retry re-attempts the write
+                    # instead of silently losing this foreclosure
+                    save_to_sheet(ws, result, existing_case_numbers)
                     found += 1
                     print(f"  -> FORECLOSURE: {result['case_number']} - {result['plaintiff_name']} v {result['defendant_name']}")
-                    save_to_sheet(ws, result)
 
-            # periodic checkpoint -- so state.jsonl shows up (and is usable
-            # for resuming) even mid-run on a long walk, not just at the end
-            if checked % CHECKPOINT_EVERY == 0:
-                append_run_state(case_year, case_type, last_completed_seq, checked, found, "checkpoint")
+            # this case is now fully done (checked, and written if it was a
+            # foreclosure) -- safe to advance the high-water mark
+            last_completed_seq = seq
+
+            # log every single caseSeq checked -- most aren't foreclosures so
+            # the sheet alone wouldn't show them, this is the full audit
+            # trail plus it doubles as the resume checkpoint
+            append_run_state(case_year, case_type, last_completed_seq, checked, found,
+                              "reached_end" if reached_end_now else "checkpoint",
+                              case_seq=case_seq, result=result_label)
+            state_logged_for_current_seq = True
+
+            if reached_end_now:
+                break
 
             seq += 1
             time.sleep(REQUEST_DELAY_SECONDS)
@@ -333,10 +378,11 @@ def walk_from(case_year: str, case_type: str, start_seq: int):
         stop_reason = f"crashed: {type(e).__name__}: {e}"
         raise
     finally:
-        # always record how far we got, even on an unhandled crash --
-        # otherwise a crash mid-run loses all progress and the next run
-        # re-walks the whole thing from scratch
-        append_run_state(case_year, case_type, last_completed_seq, checked, found, stop_reason)
+        # always record how far we got, even on an unhandled crash -- but
+        # skip it if the loop already logged this exact state on its way out
+        # (normal completion / reached_end), to avoid a redundant duplicate line
+        if not state_logged_for_current_seq:
+            append_run_state(case_year, case_type, last_completed_seq, checked, found, stop_reason)
 
     print(f"\nDone. Checked {checked} cases, {found} foreclosures found. "
           f"High-water mark now at {case_year} {case_type} {str(last_completed_seq).zfill(6)}.")
