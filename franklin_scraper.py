@@ -1,7 +1,12 @@
+import csv
+import os
 import re
 import sys
 import requests
 from bs4 import BeautifulSoup
+
+CSV_PATH = "results.csv"
+CSV_FIELDS = ["type", "case_number", "status", "date_filed", "plaintiff_name", "defendant_name"]
 
 BASE = "https://fcdcfcjs.co.franklin.oh.us/CaseInformationOnline/"
 SEARCH_URL = "https://fcdcfcjs.co.franklin.oh.us/CaseInformationOnline/caseSearch"
@@ -43,6 +48,16 @@ def build_payload(case_year: str, case_type: str, case_seq: str) -> dict:
         'txtCalendar2': '',
         'recs': '25',
     }
+
+
+def save_to_csv(row: dict, path: str = CSV_PATH):
+    file_exists = os.path.isfile(path)
+    with open(path, "a", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=CSV_FIELDS)
+        if not file_exists:
+            writer.writeheader()
+        writer.writerow(row)
+    print(f"Saved to {path}")
 
 
 def search_case(case_year: str, case_type: str, case_seq: str):
@@ -126,12 +141,16 @@ def search_case(case_year: str, case_type: str, case_seq: str):
 
 
         print(f"{type_of_case} - {case_number} - {status} - {date_filed} - {plaintiff_name} - {defendant_name}")
-        return {
+        result = {
             "type": type_of_case,
             "case_number": case_number,
             "status": status,
             "date_filed": date_filed,
+            "plaintiff_name": plaintiff_name,
+            "defendant_name": defendant_name,
         }
+        save_to_csv(result)
+        return result
     else:
         print("No FORECLOSURES case")
         return None
