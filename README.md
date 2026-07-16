@@ -2,27 +2,25 @@
 
 Scrapes the Franklin County, Ohio Clerk of Courts "Case Information Online"
 system (`https://fcdcfcjs.co.franklin.oh.us/CaseInformationOnline/`) for
-civil (`CV`) case filings, keeps the ones where `TYPE of CASE` is
-`FORECLOSURES`, and appends them to a Google Sheet.
+civil (`CV`) case filings, writes every case it finds to a Google Sheet
+tab, and additionally mirrors the ones where `TYPE of CASE` is
+`FORECLOSURES` into a second tab.
 
 ## Files
 
 - `franklin_scraper.py` — the main script. Starting from a case
-  number, walks forward one `caseSeq` at a time, keeps every `FORECLOSURES`
-  case it finds, and appends those to the Google Sheet. This is the one you
-  run on a schedule.
+  number, walks forward one `caseSeq` at a time, writes every case it finds
+  to the Google Sheet, and mirrors `FORECLOSURES` cases into a second tab.
+  This is the one you run on a schedule.
 - `config/service_account.json` — Google service account credentials
   (secret, gitignored, **not on GitHub** — see below).
-- `config/state.jsonl` — run history / resume point (also gitignored, not
-  on GitHub, regenerated automatically — see "How resuming works" below).
 - `requirements.txt` — Python dependencies.
 
 > **`config/` is intentionally not in the git repo.** It's listed in
-> `.gitignore` because it holds credentials and machine-local run state.
-> That means if you `git clone` this repo fresh onto a new machine (or a
-> cloud runner), the `config/` folder simply won't be there — you have to
-> create it yourself (step 2 below). `state.jsonl` doesn't need to be
-> created manually; the script creates it automatically on first run.
+> `.gitignore` because it holds credentials. That means if you `git clone`
+> this repo fresh onto a new machine (or a cloud runner), the `config/`
+> folder simply won't be there — you have to create it yourself (step 2
+> below).
 
 ## Setup
 
@@ -48,13 +46,17 @@ civil (`CV`) case filings, keeps the ones where `TYPE of CASE` is
 
    ```python
    SHEET_ID = "<the client's Google Sheet ID goes here>"
-   SHEET_TAB = "Sheet1"
+   SHEET_TAB = "All_Case"
    ```
 
    The Sheet ID is the long string in the Sheet's URL:
    `https://docs.google.com/spreadsheets/d/<SHEET_ID>/edit`. This is the
    client's own Sheet — get the ID from them (and make sure the service
    account email above is shared as Editor on it, per step 2).
+
+   `SHEET_TAB_FORECLOSURES` (set to `"FORECLOSURES"`) is the second tab —
+   the script creates it automatically on first run if it doesn't already
+   exist, so there's nothing to set up for it by hand.
 
 ## Running it
 
@@ -87,48 +89,51 @@ it's reached the current end of filed cases.
 
 ## How resuming works (high-water mark)
 
-Every case checked gets appended as one line to `config/state.jsonl` —
-this is a full audit trail (most checked cases aren't foreclosures, so the
-Sheet alone wouldn't show that they were ever checked). Each line looks
-like:
+There's no local state file — the Google Sheet itself is the resume point.
+On startup, the script reads the whole "Case Number" column of the
+`SHEET_TAB` tab (`All_Case`), filters it down to case numbers belonging to
+the current `caseYear`/`caseType`, and resumes from the **highest**
+`caseSeq` found there **+ 1**, completely ignoring `startSeq` in that case.
+So:
 
-```json
-{"timestamp": "...", "case_year": "26", "case_type": "CV", "case_seq": "005681", "result": "foreclosure", "last_seq": 5681, "checked": 172, "found": 27, "stop_reason": "checkpoint"}
-```
-
-On startup, the script reads the **last** line in `state.jsonl` for the
-matching `case_year`/`case_type` and resumes from `last_seq + 1`,
-completely ignoring `startSeq` in that case. So:
-
-- **First run ever** (no `state.jsonl` yet, or no line for this
+- **First run ever** (no case numbers in the sheet yet for this
   year/type): starts from `startSeq`.
-- **Every run after that**: picks up exactly where the last run left off.
+- **Every run after that**: picks up right after the last case number
+  already sitting in the Sheet.
 
 **To force a re-scan from a specific case number** (e.g. you want to
-re-check a range, or start over): delete `config/state.jsonl`, or edit it
-by hand and remove/adjust the last matching line, then set `startSeq` to
-wherever you want to resume from.
+re-check a range, or start over): remove the relevant rows from the
+`All_Case` tab (and `FORECLOSURES` tab, if applicable) in the Sheet itself,
+then set `startSeq` to wherever you want to resume from.
 
 If a request fails (timeout/connection error after retries) or the script
-crashes/is interrupted (including Ctrl+C), the state that gets saved
-reflects the **last successfully completed case**, not further — so
-nothing gets silently skipped. That case just gets retried on the next
-run.
+crashes/is interrupted (including Ctrl+C), whatever was already written to
+the Sheet stays put and nothing gets silently skipped — the next run just
+resumes from the highest case number that made it into the Sheet, and
+re-checks anything after that.
 
 ## Duplicate protection
 
 On every run, the script reads the whole "Case Number" column already in
-the Sheet before writing anything, and skips any foreclosure it finds that
-already has a row there. This means it's always safe to re-run the script,
-even over a range it's already covered — it will never create duplicate
-rows, regardless of when a previous run happened to stop.
+each tab (`All_Case` and `FORECLOSURES`) before writing anything, and skips
+any case it finds that already has a row there. This means it's always
+safe to re-run the script, even over a range it's already covered — it
+will never create duplicate rows, regardless of when a previous run
+happened to stop. This same column read is also what drives resuming (see
+above), so there's nothing extra to maintain.
 
 ## Output columns
 
-The Sheet gets rows appended (never overwritten) in this order:
+Each tab gets rows appended (never overwritten) in this order:
 
 | Case Number | Type of Case | Status | Date Filed | Defendant Name | Plaintiff Name | Case ID/Link |
 |---|---|---|---|---|---|---|
+
+- **`All_Case`** — every case the script successfully looks up, regardless
+  of type.
+- **`FORECLOSURES`** — the subset of those rows where `Type of Case` is
+  literally `FORECLOSURES`. Created automatically the first time the
+  script runs if it doesn't already exist.
 
 **Case ID/Link** is just the case number again. The court's site has no
 stable, bookmarkable URL for an individual case — every search generates a
