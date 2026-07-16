@@ -312,9 +312,6 @@ def walk_from(case_year: str, case_type: str, start_seq: int):
 
         html = fetch_case(session, case_year, case_type, case_seq)
         if html is None:
-            # request itself failed after retries -- stop here, and don't
-            # advance the high-water mark past this case, so next run
-            # retries it instead of silently skipping it
             log_message("  -> request kept failing, stopping.")
             break
 
@@ -323,29 +320,18 @@ def walk_from(case_year: str, case_type: str, start_seq: int):
 
         if result == "missing":
             consecutive_misses += 1
+            log_message(f"[{checked}] {case_year} {case_type} {case_seq} | NO Case data available")
             if consecutive_misses >= MAX_CONSECUTIVE_MISSES:
                 log_message(f"  -> hit {MAX_CONSECUTIVE_MISSES} consecutive misses, stopping.")
                 reached_end_now = True
         else:
             consecutive_misses = 0
             if result is not None:
-                # only counts as found/complete once the sheet write itself
-                # succeeds -- if this throws, last_completed_seq must NOT
-                # advance past this case, so a retry re-attempts the write
-                # instead of silently losing this foreclosure
                 save_to_sheet(ws, result, existing_case_numbers)
                 found += 1
-                log_message(f"[{checked}] {result['case_number']} | {result['type']} | {result['status']} | {result['date_filed']} | {result['case_number']} | {result['plaintiff_name']} | {result['defendant_name']}")
-
-                # NEW: additionally mirror into the FORECLOSURES-only tab,
-                # but only when the case's actual type_of_case is
-                # "FORECLOSURES" -- Sheet1 above still gets every case
-                # regardless of type
+                log_message(f"[{checked}] {result['case_number']} | {result['type']} | {result['status']} | {result['date_filed']}")
                 if result["type"] == "FORECLOSURES":
                     save_to_sheet(ws_forecl, result, existing_case_numbers_forecl)
-
-        # this case is now fully done (checked, and written if it was a
-        # foreclosure) -- safe to advance the high-water mark
         last_completed_seq = seq
 
         if reached_end_now:
