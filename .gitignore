@@ -1,0 +1,17 @@
+# Secrets / credentials — never commit these
+config/service_account.json
+
+# Runtime state (not needed in the repo, regenerated automatically)
+config/last_run.json
+scraper/_runtime/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# OS
+.DS_Store
+Thumbs.db
