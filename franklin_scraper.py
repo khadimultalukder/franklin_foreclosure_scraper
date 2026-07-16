@@ -348,7 +348,7 @@ def walk_from(case_year: str, case_type: str, start_seq: int):
 if __name__ == "__main__":
     caseYear = "26"
     caseType = "CV"
-    startSeq = 5510   # e.g. 005510 -- only used on the very first run;
+    startSeq = 5000   # e.g. 005510 -- only used on the very first run;
                       # after that, the Google Sheet's own high-water mark wins
 
     walk_from(caseYear, caseType, startSeq)
