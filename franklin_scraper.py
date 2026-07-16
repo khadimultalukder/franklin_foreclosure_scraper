@@ -1,6 +1,7 @@
 import re
 import sys
 import requests
+from bs4 import BeautifulSoup
 
 BASE = "https://fcdcfcjs.co.franklin.oh.us/CaseInformationOnline/"
 SEARCH_URL = "https://fcdcfcjs.co.franklin.oh.us/CaseInformationOnline/caseSearch"
@@ -84,3 +85,6 @@ if "NullPointerException" in response.text:
 elif "CASE DETAIL" not in response.text.upper() and "CASE LISTING" not in response.text.upper():
     print("WARNING: response doesn't look like a case result page - see case_search.html")
 
+soup = BeautifulSoup(response.text, "html.parser")
+case_summary = soup.select_one("section#case-summary-container tbody")
+print(case_summary.text)
