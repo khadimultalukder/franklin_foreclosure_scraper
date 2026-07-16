@@ -2,15 +2,14 @@
 Range walker for the Franklin County Case Information Online system.
 Separate from franklin_scraper.py (that script is untouched).
 
-Walks a range of caseSeq numbers (pagination by simple sequential increment,
-e.g. 005510, 005511, 005512, ...) under one caseYear/caseType, and appends
-any FORECLOSURES cases found to a CSV.
+Starting from a single caseSeq you provide, walks forward one case at a time
+(005510, 005511, 005512, ...) under one caseYear/caseType, and appends any
+FORECLOSURES cases found to a CSV. Stops as soon as a case number comes back
+empty (no case_number on the page) -- that's treated as "reached the end."
 
 Handles:
-  - one session/cookie jar reused across the whole range (only 1 disclaimer
+  - one session/cookie jar reused across the whole run (only 1 disclaimer
     accept + only 1 "GET home" needed, not per-case)
-  - missing/sealed case numbers -> detected via "NO CASE MATCHED THE SEARCH
-    CRITERIA." and skipped
   - polite rate limiting between requests
   - retry with backoff on timeout / connection errors
 """
@@ -176,39 +175,53 @@ def save_to_csv(row: dict, path: str = CSV_PATH):
     print(f"  -> saved to {path}")
 
 
-def walk_range(case_year: str, case_type: str, start_seq: int, end_seq: int):
+MAX_CONSECUTIVE_MISSES = 10
+
+
+def walk_from(case_year: str, case_type: str, start_seq: int):
     """Pagination by simple caseSeq increment: 005510, 005511, 005512, ...
-    One session reused for the whole range."""
+    One session reused for the whole run. Individual case numbers can be
+    gaps (sealed/missing) even while later numbers still have data, so this
+    only stops once MAX_CONSECUTIVE_MISSES in a row come back empty -- any
+    hit in between resets the miss counter."""
     session = start_session()
 
     found = 0
-    missing = 0
     checked = 0
+    consecutive_misses = 0
+    seq = start_seq
 
-    for seq in range(start_seq, end_seq + 1):
+    while True:
         case_seq = str(seq).zfill(6)
         checked += 1
         print(f"[{checked}] checking {case_year} {case_type} {case_seq} ...")
 
         html = fetch_case(session, case_year, case_type, case_seq)
         if html is None:
-            # request itself failed after retries -- skip this case, keep going
-            continue
+            # request itself failed after retries -- stop here, don't guess
+            print("  -> request kept failing, stopping.")
+            break
 
         result = parse_case(html)
         if result == "missing":
-            missing += 1
-            print("  -> no case / sealed, skipping")
-        elif result is None:
-            print("  -> not a foreclosure")
+            consecutive_misses += 1
+            print(f"  -> no case_number came back ({consecutive_misses}/{MAX_CONSECUTIVE_MISSES} consecutive misses)")
+            if consecutive_misses >= MAX_CONSECUTIVE_MISSES:
+                print(f"  -> hit {MAX_CONSECUTIVE_MISSES} consecutive misses, stopping.")
+                break
         else:
-            found += 1
-            print(f"  -> FORECLOSURE: {result['case_number']} - {result['plaintiff_name']} v {result['defendant_name']}")
-            save_to_csv(result)
+            consecutive_misses = 0
+            if result is None:
+                print("  -> not a foreclosure")
+            else:
+                found += 1
+                print(f"  -> FORECLOSURE: {result['case_number']} - {result['plaintiff_name']} v {result['defendant_name']}")
+                save_to_csv(result)
 
+        seq += 1
         time.sleep(REQUEST_DELAY_SECONDS)
 
-    print(f"\nDone. Checked {checked} cases, {missing} missing/sealed, {found} foreclosures found.")
+    print(f"\nDone. Checked {checked} cases, stopped at {case_year} {case_type} {str(seq).zfill(6)}, {found} foreclosures found.")
     return found
 
 
@@ -217,6 +230,5 @@ if __name__ == "__main__":
     caseYear = "26"
     caseType = "CV"
     startSeq = 5510   # e.g. 005510
-    endSeq = 5600     # e.g. 005520 (inclusive)
 
-    walk_range(caseYear, caseType, startSeq, endSeq)
+    walk_from(caseYear, caseType, startSeq)
