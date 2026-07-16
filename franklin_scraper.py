@@ -17,12 +17,9 @@ Requires: pip install gspread google-auth
 Uses the service account key at config/service_account.json -- make sure
 that service account's email is shared as an Editor on the target Sheet.
 """
-import json
-import os
 import re
 import sys
 import time
-from datetime import datetime, timezone
 import requests
 from bs4 import BeautifulSoup
 import gspread
@@ -63,64 +60,6 @@ SHEET_HEADERS = [
 REQUEST_DELAY_SECONDS = 1.0
 MAX_RETRIES = 3
 RETRY_BACKOFF_SECONDS = 5
-
-# high-water-mark tracking -- one line appended per run, so 2nd+ runs skip
-# whatever the previous run(s) already covered instead of re-walking from
-# startSeq every time
-STATE_FILE = "config/state.jsonl"
-
-
-def load_high_water_mark(case_year: str, case_type: str):
-    """Return the caseSeq to resume from (last recorded last_seq + 1) for
-    this case_year/case_type, or None if there's no prior run yet."""
-    if not os.path.isfile(STATE_FILE):
-        return None
-
-    last_record = None
-    with open(STATE_FILE, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                record = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if record.get("case_year") == case_year and record.get("case_type") == case_type:
-                last_record = record
-
-    if last_record is None:
-        return None
-    return last_record["last_seq"] + 1
-
-
-def append_run_state(case_year: str, case_type: str, last_seq: int, checked: int, found: int,
-                      stop_reason: str, case_seq: str = None, result: str = None):
-    """Append one line recording state. last_seq is the highest caseSeq that
-    was SUCCESSFULLY checked (a request failure does not count -- that case
-    gets retried on the next run).
-
-    Called once per individual case checked (case_seq/result identify which
-    case and what happened), plus once more at the end/on crash for the
-    final stop_reason. Every checked caseSeq shows up in this file even
-    though most aren't foreclosures -- the sheet only gets the foreclosures,
-    this jsonl is the full audit trail of everything that was checked."""
-    os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)
-    record = {
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "case_year": case_year,
-        "case_type": case_type,
-        "case_seq": case_seq,
-        "result": result,
-        "last_seq": last_seq,
-        "checked": checked,
-        "found": found,
-        "stop_reason": stop_reason,
-    }
-    with open(STATE_FILE, "a", encoding="utf-8") as f:
-        f.write(json.dumps(record) + "\n")
-    print(f"  -> state saved: last_seq={last_seq} ({stop_reason})")
-
 
 def build_payload(case_year: str, case_type: str, case_seq: str) -> dict:
     return {
@@ -270,11 +209,9 @@ def get_foreclosures_worksheet():
 
 def get_existing_case_numbers(ws) -> set:
     """Read the whole 'Case Number' column (col A) so we can skip re-adding
-    a case that's already in the sheet. This is what actually prevents
-    duplicates -- state.jsonl's checkpoint can only ever be an approximation
-    (an abrupt crash/kill can happen between a checkpoint and the next one),
-    so the sheet itself is the source of truth for "did I already write this
-    case."""
+    a case that's already in the sheet, and so the resume high-water mark
+    can be derived from it too. The sheet itself is the single source of
+    truth for "did I already write this case" and "where did I leave off."""
     col_a = ws.col_values(1)  # includes the header row
     return set(col_a[1:]) if col_a else set()
 
@@ -304,6 +241,29 @@ def save_to_sheet(ws, row: dict, existing_case_numbers: set):
 MAX_CONSECUTIVE_MISSES = 10
 
 
+def load_high_water_mark_from_sheet(existing_case_numbers: set, case_year: str, case_type: str):
+    """Resume source: the Google Sheet's own 'Case Number' column (no local
+    state file). Scans existing_case_numbers (already read from the sheet)
+    for entries belonging to this case_year/case_type,
+    and returns the highest caseSeq found + 1 -- i.e. skip every case
+    number already in the sheet and start right after the last one.
+    Returns None if no matching case number is in the sheet yet (first run
+    for this year/type combo, so startSeq is used instead)."""
+    prefix = f"{case_year}{case_type}".upper()
+    max_seq = None
+    for case_number in existing_case_numbers:
+        normalized = re.sub(r"\s+", "", case_number).upper()
+        if not normalized.startswith(prefix):
+            continue
+        m = re.search(r"(\d+)$", normalized)
+        if not m:
+            continue
+        seq = int(m.group(1))
+        if max_seq is None or seq > max_seq:
+            max_seq = seq
+    return None if max_seq is None else max_seq + 1
+
+
 def walk_from(case_year: str, case_type: str, start_seq: int):
     """Pagination by simple caseSeq increment: 005510, 005511, 005512, ...
     One session reused for the whole run. Individual case numbers can be
@@ -311,17 +271,10 @@ def walk_from(case_year: str, case_type: str, start_seq: int):
     only stops once MAX_CONSECUTIVE_MISSES in a row come back empty -- any
     hit in between resets the miss counter.
 
-    Resumes from the high-water mark in STATE_FILE if one exists for this
-    case_year/case_type -- startSeq is only used on the very first run."""
-    resume_seq = load_high_water_mark(case_year, case_type)
-    if resume_seq is not None:
-        print(f"Resuming from high-water mark: {case_year} {case_type} {str(resume_seq).zfill(6)} "
-              f"(ignoring startSeq={start_seq})")
-        seq = resume_seq
-    else:
-        print(f"No prior state found -- starting fresh from {case_year} {case_type} {str(start_seq).zfill(6)}")
-        seq = start_seq
-
+    Resumes from the Google Sheet's own Case Number column (highest caseSeq
+    already there, for this case_year/case_type) if a match exists --
+    startSeq is only used on the very first run / first time this
+    case_year/case_type shows up in the sheet."""
     session = start_session()
     ws = get_worksheet()
     existing_case_numbers = get_existing_case_numbers(ws)
@@ -334,91 +287,72 @@ def walk_from(case_year: str, case_type: str, start_seq: int):
     print(f"Also mirroring FORECLOSURES-only rows to tab '{ws_forecl.title}' "
           f"({len(existing_case_numbers_forecl)} case(s) already in it)")
 
+    resume_seq = load_high_water_mark_from_sheet(existing_case_numbers, case_year, case_type)
+    if resume_seq is not None:
+        print(f"Resuming from Google Sheet high-water mark: {case_year} {case_type} "
+              f"{str(resume_seq).zfill(6)} (ignoring startSeq={start_seq})")
+        seq = resume_seq
+    else:
+        print(f"No matching case numbers found in the sheet yet -- starting fresh from "
+              f"{case_year} {case_type} {str(start_seq).zfill(6)}")
+        seq = start_seq
+
     found = 0
     checked = 0
     consecutive_misses = 0
     last_completed_seq = seq - 1  # nothing successfully checked yet
-    stop_reason = "reached_end"
-    state_logged_for_current_seq = True  # nothing pending yet
 
-    try:
-        while True:
-            case_seq = str(seq).zfill(6)
-            checked += 1
-            state_logged_for_current_seq = False
-            print(f"[{checked}] checking {case_year} {case_type} {case_seq} ...")
+    while True:
+        case_seq = str(seq).zfill(6)
+        checked += 1
+        print(f"[{checked}] checking {case_year} {case_type} {case_seq} ...")
 
-            html = fetch_case(session, case_year, case_type, case_seq)
-            if html is None:
-                # request itself failed after retries -- stop here, and don't
-                # advance the high-water mark past this case, so next run
-                # retries it instead of silently skipping it
-                print("  -> request kept failing, stopping.")
-                stop_reason = "request_failed"
-                break
+        html = fetch_case(session, case_year, case_type, case_seq)
+        if html is None:
+            # request itself failed after retries -- stop here, and don't
+            # advance the high-water mark past this case, so next run
+            # retries it instead of silently skipping it
+            print("  -> request kept failing, stopping.")
+            break
 
-            result = parse_case(html)
-            reached_end_now = False
+        result = parse_case(html)
+        reached_end_now = False
 
-            if result == "missing":
-                result_label = "missing"
-                consecutive_misses += 1
-                print(f"  -> no case_number came back ({consecutive_misses}/{MAX_CONSECUTIVE_MISSES} consecutive misses)")
-                if consecutive_misses >= MAX_CONSECUTIVE_MISSES:
-                    print(f"  -> hit {MAX_CONSECUTIVE_MISSES} consecutive misses, stopping.")
-                    stop_reason = "reached_end"
-                    reached_end_now = True
+        if result == "missing":
+            consecutive_misses += 1
+            print(f"  -> no case_number came back ({consecutive_misses}/{MAX_CONSECUTIVE_MISSES} consecutive misses)")
+            if consecutive_misses >= MAX_CONSECUTIVE_MISSES:
+                print(f"  -> hit {MAX_CONSECUTIVE_MISSES} consecutive misses, stopping.")
+                reached_end_now = True
+        else:
+            consecutive_misses = 0
+            if result is None:
+                print("  -> not a foreclosure")
             else:
-                consecutive_misses = 0
-                if result is None:
-                    result_label = "not_foreclosure"
-                    print("  -> not a foreclosure")
-                else:
-                    result_label = "foreclosure"
-                    # only counts as found/complete once the sheet write itself
-                    # succeeds -- if this throws, last_completed_seq must NOT
-                    # advance past this case, so a retry re-attempts the write
-                    # instead of silently losing this foreclosure
-                    save_to_sheet(ws, result, existing_case_numbers)
-                    found += 1
-                    print(f"  -> FORECLOSURE: {result['case_number']} - {result['plaintiff_name']} v {result['defendant_name']}")
+                # only counts as found/complete once the sheet write itself
+                # succeeds -- if this throws, last_completed_seq must NOT
+                # advance past this case, so a retry re-attempts the write
+                # instead of silently losing this foreclosure
+                save_to_sheet(ws, result, existing_case_numbers)
+                found += 1
+                print(f"  -> FORECLOSURE: {result['case_number']} - {result['plaintiff_name']} v {result['defendant_name']}")
 
-                    # NEW: additionally mirror into the FORECLOSURES-only tab,
-                    # but only when the case's actual type_of_case is
-                    # "FORECLOSURES" -- Sheet1 above still gets every case
-                    # regardless of type
-                    if result["type"] == "FORECLOSURES":
-                        save_to_sheet(ws_forecl, result, existing_case_numbers_forecl)
+                # NEW: additionally mirror into the FORECLOSURES-only tab,
+                # but only when the case's actual type_of_case is
+                # "FORECLOSURES" -- Sheet1 above still gets every case
+                # regardless of type
+                if result["type"] == "FORECLOSURES":
+                    save_to_sheet(ws_forecl, result, existing_case_numbers_forecl)
 
-            # this case is now fully done (checked, and written if it was a
-            # foreclosure) -- safe to advance the high-water mark
-            last_completed_seq = seq
+        # this case is now fully done (checked, and written if it was a
+        # foreclosure) -- safe to advance the high-water mark
+        last_completed_seq = seq
 
-            # log every single caseSeq checked -- most aren't foreclosures so
-            # the sheet alone wouldn't show them, this is the full audit
-            # trail plus it doubles as the resume checkpoint
-            append_run_state(case_year, case_type, last_completed_seq, checked, found,
-                              "reached_end" if reached_end_now else "checkpoint",
-                              case_seq=case_seq, result=result_label)
-            state_logged_for_current_seq = True
+        if reached_end_now:
+            break
 
-            if reached_end_now:
-                break
-
-            seq += 1
-            time.sleep(REQUEST_DELAY_SECONDS)
-    except BaseException as e:
-        # BaseException (not just Exception) so Ctrl+C / KeyboardInterrupt
-        # and SystemExit get an accurate stop_reason too, instead of falling
-        # through to the "reached_end" default
-        stop_reason = f"interrupted: {type(e).__name__}: {e}"
-        raise
-    finally:
-        # always record how far we got, even on an unhandled crash -- but
-        # skip it if the loop already logged this exact state on its way out
-        # (normal completion / reached_end), to avoid a redundant duplicate line
-        if not state_logged_for_current_seq:
-            append_run_state(case_year, case_type, last_completed_seq, checked, found, stop_reason)
+        seq += 1
+        time.sleep(REQUEST_DELAY_SECONDS)
 
     print(f"\nDone. Checked {checked} cases, {found} foreclosures found. "
           f"High-water mark now at {case_year} {case_type} {str(last_completed_seq).zfill(6)}.")
@@ -429,6 +363,6 @@ if __name__ == "__main__":
     caseYear = "26"
     caseType = "CV"
     startSeq = 5510   # e.g. 005510 -- only used on the very first run;
-                      # after that, config/state.jsonl's high-water mark wins
+                      # after that, the Google Sheet's own high-water mark wins
 
     walk_from(caseYear, caseType, startSeq)
