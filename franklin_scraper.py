@@ -17,6 +17,7 @@ Requires: pip install gspread google-auth
 Uses the service account key at config/service_account.json -- make sure
 that service account's email is shared as an Editor on the target Sheet.
 """
+import datetime
 import re
 import sys
 import time
@@ -24,6 +25,14 @@ import requests
 from bs4 import BeautifulSoup
 import gspread
 from google.oauth2.service_account import Credentials
+
+
+def log_message(message, color=None):
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    formatted_message = f"{timestamp} - {message}"
+    # Print with color if specified
+    print(f"{formatted_message}")
+
 
 BASE = "https://fcdcfcjs.co.franklin.oh.us/CaseInformationOnline/"
 SEARCH_URL = "https://fcdcfcjs.co.franklin.oh.us/CaseInformationOnline/caseSearch"
@@ -90,7 +99,7 @@ def start_session() -> requests.Session:
     session.headers.update(COMMON_HEADERS)
 
     home_resp = session.get(BASE, timeout=30)
-    print("GET home ->", home_resp.status_code, len(home_resp.text), "bytes")
+    log_message(f"GET home -> {home_resp.status_code} {len(home_resp.text)} bytes")
 
     if "Conditions of Use" in home_resp.text:
         m = re.search(r"acceptDisclaimer\?([^\"'>]+)", home_resp.text)
@@ -108,11 +117,11 @@ def start_session() -> requests.Session:
             data={"fromPage": "index", "Accept": "ACCEPT"},
             timeout=30,
         )
-        print("POST acceptDisclaimer ->", accept_resp.status_code, len(accept_resp.text), "bytes")
+        log_message(f"POST acceptDisclaimer -> {accept_resp.status_code} {len(accept_resp.text)} bytes")
         if "Conditions of Use" in accept_resp.text:
             sys.exit("Still on the disclaimer page after accepting -- accept step did not stick")
     else:
-        print("No disclaimer shown (session already had a prior 'accepted' cookie).")
+        log_message("No disclaimer shown (session already had a prior 'accepted' cookie).")
 
     return session
 
@@ -133,10 +142,10 @@ def fetch_case(session: requests.Session, case_year: str, case_type: str, case_s
             response = session.post(SEARCH_URL, headers=search_headers, data=payload, timeout=30)
             return response.text
         except (requests.Timeout, requests.ConnectionError) as e:
-            print(f"  [{case_year} {case_type} {case_seq}] request failed (attempt {attempt}/{MAX_RETRIES}): {e}")
+            log_message(f"  [{case_year} {case_type} {case_seq}] request failed (attempt {attempt}/{MAX_RETRIES}): {e}")
             if attempt < MAX_RETRIES:
                 time.sleep(RETRY_BACKOFF_SECONDS * attempt)
-    print(f"  [{case_year} {case_type} {case_seq}] giving up after {MAX_RETRIES} attempts")
+    log_message(f"  [{case_year} {case_type} {case_seq}] giving up after {MAX_RETRIES} attempts")
     return None
 
 
@@ -157,9 +166,6 @@ def parse_case(html: str):
         return "missing"
 
     type_of_case = tds[2].text.strip()
-    # if type_of_case != "FORECLOSURES":
-    #     return None
-
     case_number = tds[1].text.strip()
     status = tds[3].text.strip()
     date_filed = tds[4].text.strip()
@@ -221,7 +227,6 @@ def save_to_sheet(ws, row: dict, existing_case_numbers: set):
     which always inserts after the last row with data -- it cannot overwrite
     existing rows. Skips writing if this case_number is already present."""
     if row["case_number"] in existing_case_numbers:
-        print(f"  -> {row['case_number']} already in the sheet, skipping (dup guard)")
         return
 
     values = [
@@ -235,7 +240,6 @@ def save_to_sheet(ws, row: dict, existing_case_numbers: set):
     ]
     ws.append_row(values, value_input_option="RAW")
     existing_case_numbers.add(row["case_number"])
-    print("  -> appended to Google Sheet")
 
 
 MAX_CONSECUTIVE_MISSES = 10
@@ -278,23 +282,23 @@ def walk_from(case_year: str, case_type: str, start_seq: int):
     session = start_session()
     ws = get_worksheet()
     existing_case_numbers = get_existing_case_numbers(ws)
-    print(f"Writing to Google Sheet '{ws.spreadsheet.title}' / tab '{ws.title}' "
-          f"({len(existing_case_numbers)} case(s) already in it)")
+    log_message(f"Writing to Google Sheet '{ws.spreadsheet.title}' / tab '{ws.title}' "
+                f"({len(existing_case_numbers)} case(s) already in it)")
 
     # NEW: second tab that only receives type_of_case == "FORECLOSURES" rows
     ws_forecl = get_foreclosures_worksheet()
     existing_case_numbers_forecl = get_existing_case_numbers(ws_forecl)
-    print(f"Also mirroring FORECLOSURES-only rows to tab '{ws_forecl.title}' "
-          f"({len(existing_case_numbers_forecl)} case(s) already in it)")
+    log_message(f"Also mirroring FORECLOSURES-only rows to tab '{ws_forecl.title}' "
+                f"({len(existing_case_numbers_forecl)} case(s) already in it)")
 
     resume_seq = load_high_water_mark_from_sheet(existing_case_numbers, case_year, case_type)
     if resume_seq is not None:
-        print(f"Resuming from Google Sheet high-water mark: {case_year} {case_type} "
-              f"{str(resume_seq).zfill(6)} (ignoring startSeq={start_seq})")
+        log_message(f"Resuming from Google Sheet high-water mark: {case_year} {case_type} "
+                    f"{str(resume_seq).zfill(6)} (ignoring startSeq={start_seq})")
         seq = resume_seq
     else:
-        print(f"No matching case numbers found in the sheet yet -- starting fresh from "
-              f"{case_year} {case_type} {str(start_seq).zfill(6)}")
+        log_message(f"No matching case numbers found in the sheet yet -- starting fresh from "
+                    f"{case_year} {case_type} {str(start_seq).zfill(6)}")
         seq = start_seq
 
     found = 0
@@ -305,14 +309,13 @@ def walk_from(case_year: str, case_type: str, start_seq: int):
     while True:
         case_seq = str(seq).zfill(6)
         checked += 1
-        print(f"[{checked}] checking {case_year} {case_type} {case_seq} ...")
 
         html = fetch_case(session, case_year, case_type, case_seq)
         if html is None:
             # request itself failed after retries -- stop here, and don't
             # advance the high-water mark past this case, so next run
             # retries it instead of silently skipping it
-            print("  -> request kept failing, stopping.")
+            log_message("  -> request kept failing, stopping.")
             break
 
         result = parse_case(html)
@@ -320,22 +323,19 @@ def walk_from(case_year: str, case_type: str, start_seq: int):
 
         if result == "missing":
             consecutive_misses += 1
-            print(f"  -> no case_number came back ({consecutive_misses}/{MAX_CONSECUTIVE_MISSES} consecutive misses)")
             if consecutive_misses >= MAX_CONSECUTIVE_MISSES:
-                print(f"  -> hit {MAX_CONSECUTIVE_MISSES} consecutive misses, stopping.")
+                log_message(f"  -> hit {MAX_CONSECUTIVE_MISSES} consecutive misses, stopping.")
                 reached_end_now = True
         else:
             consecutive_misses = 0
-            if result is None:
-                print("  -> not a foreclosure")
-            else:
+            if result is not None:
                 # only counts as found/complete once the sheet write itself
                 # succeeds -- if this throws, last_completed_seq must NOT
                 # advance past this case, so a retry re-attempts the write
                 # instead of silently losing this foreclosure
                 save_to_sheet(ws, result, existing_case_numbers)
                 found += 1
-                print(f"  -> FORECLOSURE: {result['case_number']} - {result['plaintiff_name']} v {result['defendant_name']}")
+                print(f"[{checked}] FORECLOSURE: {result['case_number']} - {result['plaintiff_name']} v {result['defendant_name']}")
 
                 # NEW: additionally mirror into the FORECLOSURES-only tab,
                 # but only when the case's actual type_of_case is
@@ -354,8 +354,8 @@ def walk_from(case_year: str, case_type: str, start_seq: int):
         seq += 1
         time.sleep(REQUEST_DELAY_SECONDS)
 
-    print(f"\nDone. Checked {checked} cases, {found} foreclosures found. "
-          f"High-water mark now at {case_year} {case_type} {str(last_completed_seq).zfill(6)}.")
+    log_message(f"Done. Checked {checked} cases, {found} foreclosures found. "
+                f"High-water mark now at {case_year} {case_type} {str(last_completed_seq).zfill(6)}.")
     return found
 
 
