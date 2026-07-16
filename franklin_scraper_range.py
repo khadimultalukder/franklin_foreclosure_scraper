@@ -53,7 +53,7 @@ SHEET_SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 # order matches the client's required column order
 SHEET_HEADERS = [
     "Case Number", "Type of Case", "Status", "Date Filed",
-    "Defendant Name", "Plaintiff Name", "Case ID",
+    "Defendant Name", "Plaintiff Name", "Case Link",
 ]
 
 # be polite to an old government server
@@ -257,6 +257,7 @@ def save_to_sheet(ws, row: dict):
 
 
 MAX_CONSECUTIVE_MISSES = 10
+CHECKPOINT_EVERY = 20  # write a state.jsonl checkpoint every N cases, not just at the end
 
 
 def walk_from(case_year: str, case_type: str, start_seq: int):
@@ -287,43 +288,56 @@ def walk_from(case_year: str, case_type: str, start_seq: int):
     last_completed_seq = seq - 1  # nothing successfully checked yet
     stop_reason = "reached_end"
 
-    while True:
-        case_seq = str(seq).zfill(6)
-        checked += 1
-        print(f"[{checked}] checking {case_year} {case_type} {case_seq} ...")
+    try:
+        while True:
+            case_seq = str(seq).zfill(6)
+            checked += 1
+            print(f"[{checked}] checking {case_year} {case_type} {case_seq} ...")
 
-        html = fetch_case(session, case_year, case_type, case_seq)
-        if html is None:
-            # request itself failed after retries -- stop here, and don't
-            # advance the high-water mark past this case, so next run
-            # retries it instead of silently skipping it
-            print("  -> request kept failing, stopping.")
-            stop_reason = "request_failed"
-            break
-
-        result = parse_case(html)
-        last_completed_seq = seq
-
-        if result == "missing":
-            consecutive_misses += 1
-            print(f"  -> no case_number came back ({consecutive_misses}/{MAX_CONSECUTIVE_MISSES} consecutive misses)")
-            if consecutive_misses >= MAX_CONSECUTIVE_MISSES:
-                print(f"  -> hit {MAX_CONSECUTIVE_MISSES} consecutive misses, stopping.")
-                stop_reason = "reached_end"
+            html = fetch_case(session, case_year, case_type, case_seq)
+            if html is None:
+                # request itself failed after retries -- stop here, and don't
+                # advance the high-water mark past this case, so next run
+                # retries it instead of silently skipping it
+                print("  -> request kept failing, stopping.")
+                stop_reason = "request_failed"
                 break
-        else:
-            consecutive_misses = 0
-            if result is None:
-                print("  -> not a foreclosure")
+
+            result = parse_case(html)
+            last_completed_seq = seq
+
+            if result == "missing":
+                consecutive_misses += 1
+                print(f"  -> no case_number came back ({consecutive_misses}/{MAX_CONSECUTIVE_MISSES} consecutive misses)")
+                if consecutive_misses >= MAX_CONSECUTIVE_MISSES:
+                    print(f"  -> hit {MAX_CONSECUTIVE_MISSES} consecutive misses, stopping.")
+                    stop_reason = "reached_end"
+                    break
             else:
-                found += 1
-                print(f"  -> FORECLOSURE: {result['case_number']} - {result['plaintiff_name']} v {result['defendant_name']}")
-                save_to_sheet(ws, result)
+                consecutive_misses = 0
+                if result is None:
+                    print("  -> not a foreclosure")
+                else:
+                    found += 1
+                    print(f"  -> FORECLOSURE: {result['case_number']} - {result['plaintiff_name']} v {result['defendant_name']}")
+                    save_to_sheet(ws, result)
 
-        seq += 1
-        time.sleep(REQUEST_DELAY_SECONDS)
+            # periodic checkpoint -- so state.jsonl shows up (and is usable
+            # for resuming) even mid-run on a long walk, not just at the end
+            if checked % CHECKPOINT_EVERY == 0:
+                append_run_state(case_year, case_type, last_completed_seq, checked, found, "checkpoint")
 
-    append_run_state(case_year, case_type, last_completed_seq, checked, found, stop_reason)
+            seq += 1
+            time.sleep(REQUEST_DELAY_SECONDS)
+    except Exception as e:
+        stop_reason = f"crashed: {type(e).__name__}: {e}"
+        raise
+    finally:
+        # always record how far we got, even on an unhandled crash --
+        # otherwise a crash mid-run loses all progress and the next run
+        # re-walks the whole thing from scratch
+        append_run_state(case_year, case_type, last_completed_seq, checked, found, stop_reason)
+
     print(f"\nDone. Checked {checked} cases, {found} foreclosures found. "
           f"High-water mark now at {case_year} {case_type} {str(last_completed_seq).zfill(6)}.")
     return found
