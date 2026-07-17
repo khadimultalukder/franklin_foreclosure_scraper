@@ -9,7 +9,7 @@ IF %ERRORLEVEL% NEQ 0 (
 
 
 echo Running the crawler script...
-python Rightmove_automation_bot.py
+python franklin_scraper.py
 
 REM Done
 echo ============================================
