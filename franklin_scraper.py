@@ -26,6 +26,16 @@ from bs4 import BeautifulSoup
 import gspread
 from google.oauth2.service_account import Credentials
 
+# Force UTF-8 on stdout/stderr. Without this, Windows falls back to the
+# system codepage (e.g. cp1252) whenever output isn't a real console --
+# which is exactly what happens when stdout is redirected to a file
+# (`python franklin_scraper.py >> logs\run_log.txt`), and cp1252 can't
+# encode the checkmark/cross icons used below, crashing the whole run.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 
 def log_message(message, color=None):
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
