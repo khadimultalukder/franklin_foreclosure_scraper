@@ -9,7 +9,7 @@ IF %ERRORLEVEL% NEQ 0 (
 
 
 echo Running the crawler script...
-python franklin_scraper.py
+python franklin_scraper.py >> logs\run_log.txt 2>&1
 
 REM Done
 echo ============================================
