@@ -15,4 +15,4 @@ REM Done
 echo ============================================
 echo Script finished successfully!
 echo ============================================
-pause
+
