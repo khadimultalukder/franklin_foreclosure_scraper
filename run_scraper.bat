@@ -1,8 +1,18 @@
 @echo off
-cd /d "C:\Users\Administrator\Desktop\franklin_foreclosure_scraper"
-if errorlevel 1 (
-    echo Failed to cd to project folder
-    exit /b 1
+REM Step 1: Check if Python is installed
+where python >nul 2>nul
+IF %ERRORLEVEL% NEQ 0 (
+    echo ❌ Python not found. Please install Python 3.10+ and re-run.
+    pause
+    exit /b
 )
-if not exist logs mkdir logs
-python franklin_scraper.py >> logs\run_log.txt 2>&1
+
+
+echo Running the crawler script...
+python Rightmove_automation_bot.py
+
+REM Done
+echo ============================================
+echo Script finished successfully!
+echo ============================================
+pause
