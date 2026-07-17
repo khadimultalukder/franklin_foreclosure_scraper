@@ -12,8 +12,14 @@ tab, and additionally mirrors the ones where `TYPE of CASE` is
   number, walks forward one `caseSeq` at a time, writes every case it finds
   to the Google Sheet, and mirrors `FORECLOSURES` cases into a second tab.
   This is the one you run on a schedule.
+- `run_scraper.bat` — Windows wrapper around the script (checks Python is
+  installed, `cd`s into the project folder, runs the script unbuffered,
+  and appends output to `logs\run_log.txt`). This is what Windows Task
+  Scheduler should point at — see "Running on a schedule" below.
 - `config/service_account.json` — Google service account credentials
   (secret, gitignored, **not on GitHub** — see below).
+- `logs/run_log.txt` — created automatically by `run_scraper.bat` the
+  first time it runs; gitignored, not on GitHub.
 - `requirements.txt` — Python dependencies.
 
 > **`config/` is intentionally not in the git repo.** It's listed in
@@ -87,6 +93,58 @@ stop at the first miss — it only stops once it hits 10 consecutive misses
 in a row (`MAX_CONSECUTIVE_MISSES` near the top of the file), which means
 it's reached the current end of filed cases.
 
+## Log format
+
+Every line goes through a `log_message()` helper that prefixes a
+`YYYY-MM-DD HH:MM:SS` timestamp. Two kinds of lines show up while it's
+walking cases:
+
+```
+2026-07-17 00:15:10 - ✅ [148] 26 CV 006569 | FORECLOSURES | ACTIVE | 06/26/2026
+2026-07-17 00:15:12 - ❌ [149] 26 CV 006570 | NO Case data available
+```
+
+- **✅** — a case was found and written to `All_Case` (and to
+  `FORECLOSURES` too, if its type matched). Fields are pipe-delimited:
+  case number, type of case, status, date filed.
+- **❌** — that `caseSeq` didn't exist (sealed or not filed). Counts toward
+  the `MAX_CONSECUTIVE_MISSES` stop condition.
+
+Startup info (session/disclaimer, which Sheet tabs it's writing to, the
+resume point) and the final "Done. Checked N cases..." summary also go
+through `log_message()`, so they're timestamped too.
+
+## Running on a schedule (Windows Task Scheduler)
+
+`run_scraper.bat` is the entry point for unattended runs:
+
+1. Checks `python` is on `PATH` (fails fast with a message if not, instead
+   of Task Scheduler silently doing nothing).
+2. `cd`s into the project folder — **update this path in the `.bat` file
+   if you move the project**, since Task Scheduler starts a task in
+   `C:\Windows\System32` by default, not the script's own folder.
+3. Creates `logs\` if it doesn't exist yet.
+4. Runs `python -u franklin_scraper.py >> logs\run_log.txt 2>&1`. The `-u`
+   flag disables Python's output buffering — without it, log lines sit in
+   memory and don't reach the file until the process exits, which makes a
+   long-running task look like it's silently doing nothing.
+
+To schedule it:
+
+- Open Task Scheduler → **Create Task** (not "Basic Task", for full
+  control).
+- **General**: check "Run whether user is logged on or not" so it still
+  runs if the RDP session disconnects.
+- **Triggers**: New → Daily, pick a time.
+- **Actions**: New → Program/script → point at `run_scraper.bat`. Leave
+  "Start in" blank — the `.bat` handles `cd` itself.
+- **Settings**: don't set an aggressive "stop the task if it runs longer
+  than" limit — a run walking through a large backlog can take a while.
+
+After a run (or while one is in progress, since output is unbuffered now),
+check `logs\run_log.txt` to see what happened. No console window popping
+up is normal — Task Scheduler runs tasks in a hidden session.
+
 ## How resuming works (high-water mark)
 
 There's no local state file — the Google Sheet itself is the resume point.
@@ -145,14 +203,15 @@ nothing else to put there.
 - **Property address is not included.** It's not on the case-detail page —
   it's inside the complaint PDF, which isn't parsed by this scraper (by
   design, per the original scope).
-- **No cloud scheduling set up yet.** Right now this runs wherever you run
-  it manually (e.g. your PC via `python franklin_scraper.py`). To run
-  it unattended on a daily schedule (GitHub Actions cron, cloud function,
-  etc.) is a separate deployment step not yet configured. Whichever option
-  is used, remember `config/service_account.json` isn't in the repo (see
-  above) — it'll need to be provided to the runner some other way, e.g. as
-  a GitHub Actions secret that gets written to `config/service_account.json`
-  at the start of the workflow, not committed to the repo.
+- **Scheduling is local (Windows Task Scheduler), not cloud-based.** See
+  "Running on a schedule" above. It runs on whichever Windows machine
+  `run_scraper.bat` and `config/service_account.json` are set up on (e.g.
+  the client's RDP server) — there's no cloud runner (GitHub Actions cron,
+  cloud function, etc.) involved. Moving to one later is possible, but
+  remember `config/service_account.json` isn't in the repo (see above) —
+  it'd need to be provided to the runner some other way, e.g. as a GitHub
+  Actions secret written to that path at the start of the workflow, not
+  committed to the repo.
 - **Rate limiting:** the script waits 1 second between requests and retries
   failed requests up to 3 times with backoff, to be polite to an old
   government server. Don't lower `REQUEST_DELAY_SECONDS` aggressively.
@@ -161,9 +220,31 @@ nothing else to put there.
 
 - **"NO CASE MATCHED THE SEARCH CRITERIA"** in the console just means that
   particular case number doesn't exist (sealed, or not filed) — this is
-  normal and expected, not an error.
+  normal and expected, not an error, and shows up as a ❌ line (see "Log
+  format" above).
 - **Script exits with a disclaimer error** — the "Conditions of Use" accept
   step didn't work; the site may have changed its disclaimer page.
 - **Sheet writes fail** — double check the service account email has
   Editor access on the Sheet, and that `config/service_account.json` is the
   current, valid key.
+- **`UnicodeEncodeError: 'charmap' codec can't encode character...`** — this
+  happened on older versions of the script when output was redirected to a
+  file (`>> logs\run_log.txt`) on Windows: without a real console, Python
+  falls back to the system codepage (e.g. `cp1252`), which can't encode the
+  ✅/❌ icons. Fixed by forcing UTF-8 on stdout/stderr near the top of
+  `franklin_scraper.py`. If you ever see this again, that's the first place
+  to check.
+- **Task Scheduler shows the task "Running" for a long time with an empty
+  or missing `logs\run_log.txt`** — most likely output buffering, not a
+  hang: Python fully buffers stdout when it isn't attached to a real
+  console, so log lines can sit in memory for a long time before actually
+  reaching the file. `run_scraper.bat` runs the script with `python -u`
+  (unbuffered) specifically to avoid this — make sure that flag is still
+  there if you've edited the `.bat`. No console window appearing is normal
+  and not related to this; Task Scheduler runs tasks in a hidden session.
+- **Task appears to run but nothing happens / nothing gets written** —
+  check that `run_scraper.bat`'s `cd /d "..."` line points at wherever the
+  project actually lives on that machine. Task Scheduler starts a task in
+  `C:\Windows\System32` by default (not the `.bat` file's own folder), so
+  if that path is stale after moving the project, the script can't find
+  itself or `config/service_account.json`.
