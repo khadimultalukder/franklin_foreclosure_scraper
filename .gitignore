@@ -1,10 +1,8 @@
 # Secrets / credentials — never commit these
 config/service_account.json
 
-# Runtime state (not needed in the repo, regenerated automatically)
-config/last_run.json
-config/state.jsonl
-scraper/_runtime/
+# Runtime output (not needed in the repo, regenerated automatically)
+logs/
 
 # Python
 __pycache__/
