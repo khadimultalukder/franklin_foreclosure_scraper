@@ -26,15 +26,20 @@ from bs4 import BeautifulSoup
 import gspread
 from google.oauth2.service_account import Credentials
 
-# Force UTF-8 on stdout/stderr. Without this, Windows falls back to the
-# system codepage (e.g. cp1252) whenever output isn't a real console --
-# which is exactly what happens when stdout is redirected to a file
-# (`python franklin_scraper.py >> logs\run_log.txt`), and cp1252 can't
-# encode the checkmark/cross icons used below, crashing the whole run.
+# Force UTF-8 + line-buffered stdout/stderr.
+#   - encoding="utf-8": without this, Windows falls back to the system
+#     codepage (e.g. cp1252) whenever output isn't a real console -- which is
+#     exactly what happens when stdout is redirected to a file
+#     (`python franklin_scraper.py >> logs\run_log.txt`), and cp1252 can't
+#     encode the checkmark/cross icons used below, crashing the whole run.
+#   - line_buffering=True: Python fully buffers stdout when it isn't a real
+#     console, so without this, log lines pile up in memory and never reach
+#     the log file until the process exits -- making a long-running task
+#     look like it's produced no output even while it's working fine.
 if hasattr(sys.stdout, "reconfigure"):
-    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
 if hasattr(sys.stderr, "reconfigure"):
-    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
 
 
 def log_message(message, color=None):
