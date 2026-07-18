@@ -68,10 +68,6 @@ COMMON_HEADERS = {
 SERVICE_ACCOUNT_FILE = "config/service_account.json"
 SHEET_ID = "1-4vsPPHH9m-vzbKa-fZ3mP7CrDPnEqwVAlVkfXhvitQ"
 SHEET_TAB = "All_Case"
-# NEW: second tab that only ever receives rows whose type_of_case is
-# literally "FORECLOSURES" -- Sheet1 keeps getting every case regardless
-# of type, unchanged from before.
-SHEET_TAB_FORECLOSURES = "FORECLOSURES"
 SHEET_SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
 # order matches the client's required column order
@@ -211,23 +207,6 @@ def get_worksheet():
     return ws
 
 
-def get_foreclosures_worksheet():
-    """NEW: same spreadsheet, second tab ('FORECLOSURES'). Created
-    automatically if it doesn't exist yet. Only rows whose type_of_case ==
-    'FORECLOSURES' get mirrored here -- everything else still only goes to
-    Sheet1."""
-    creds = Credentials.from_service_account_file(SERVICE_ACCOUNT_FILE, scopes=SHEET_SCOPES)
-    gc = gspread.authorize(creds)
-    sh = gc.open_by_key(SHEET_ID)
-    try:
-        ws = sh.worksheet(SHEET_TAB_FORECLOSURES)
-    except gspread.exceptions.WorksheetNotFound:
-        ws = sh.add_worksheet(title=SHEET_TAB_FORECLOSURES, rows=1000, cols=len(SHEET_HEADERS))
-    if not ws.row_values(1):
-        ws.append_row(SHEET_HEADERS, value_input_option="RAW")
-    return ws
-
-
 def get_existing_case_numbers(ws) -> set:
     """Read the whole 'Case Number' column (col A) so we can skip re-adding
     a case that's already in the sheet, and so the resume high-water mark
@@ -300,12 +279,6 @@ def walk_from(case_year: str, case_type: str, start_seq: int):
     log_message(f"Writing to Google Sheet '{ws.spreadsheet.title}' / tab '{ws.title}' "
                 f"({len(existing_case_numbers)} case(s) already in it)")
 
-    # NEW: second tab that only receives type_of_case == "FORECLOSURES" rows
-    ws_forecl = get_foreclosures_worksheet()
-    existing_case_numbers_forecl = get_existing_case_numbers(ws_forecl)
-    log_message(f"Also mirroring FORECLOSURES-only rows to tab '{ws_forecl.title}' "
-                f"({len(existing_case_numbers_forecl)} case(s) already in it)")
-
     resume_seq = load_high_water_mark_from_sheet(existing_case_numbers, case_year, case_type)
     if resume_seq is not None:
         log_message(f"Resuming from Google Sheet high-water mark: {case_year} {case_type} "
@@ -345,8 +318,6 @@ def walk_from(case_year: str, case_type: str, start_seq: int):
                 save_to_sheet(ws, result, existing_case_numbers)
                 found += 1
                 log_message(f"✅ [{checked}] {case_seq} | {result['type']} | {result['status']} | {result['date_filed']}")
-                if result["type"] == "FORECLOSURES":
-                    save_to_sheet(ws_forecl, result, existing_case_numbers_forecl)
         last_completed_seq = seq
 
         if reached_end_now:
