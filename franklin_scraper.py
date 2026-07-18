@@ -67,7 +67,7 @@ COMMON_HEADERS = {
 
 SERVICE_ACCOUNT_FILE = "config/service_account.json"
 SHEET_ID = "1-4vsPPHH9m-vzbKa-fZ3mP7CrDPnEqwVAlVkfXhvitQ"
-SHEET_TAB = "All_Case"
+SHEET_TAB = "Lawsuits"
 SHEET_SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
 # order matches the client's required column order
