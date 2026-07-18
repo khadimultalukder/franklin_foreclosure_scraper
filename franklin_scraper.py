@@ -73,7 +73,7 @@ SHEET_SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 # order matches the client's required column order
 SHEET_HEADERS = [
     "Case Number", "Type of Case", "Status", "Date Filed",
-    "Defendant Name", "Plaintiff Name", "Case ID/Link",
+    "Defendant Name", "Plaintiff Name", "Case ID/Link", "Scraped Date",
 ]
 
 # be polite to an old government server
@@ -231,6 +231,7 @@ def save_to_sheet(ws, row: dict, existing_case_numbers: set):
         row["defendant_name"],
         row["plaintiff_name"],
         row["case_number"],  # Case ID/Link -- site has no stable permalink, case number doubles as the ID/link
+        datetime.date.today().isoformat(),  # Scraped Date
     ]
     ws.append_row(values, value_input_option="RAW")
     existing_case_numbers.add(row["case_number"])
