@@ -68,6 +68,7 @@ COMMON_HEADERS = {
 SERVICE_ACCOUNT_FILE = "config/service_account.json"
 SHEET_ID = "1-4vsPPHH9m-vzbKa-fZ3mP7CrDPnEqwVAlVkfXhvitQ"
 SHEET_TAB = "Lawsuits"
+SHEET_TAB_FORECLOSURES = "FC Cases"  # mirror tab: rows where Type of Case == FORECLOSURES
 SHEET_SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
 # order matches the client's required column order
@@ -207,6 +208,18 @@ def get_worksheet():
     return ws
 
 
+def get_foreclosures_worksheet(sh):
+    """Same idea as get_worksheet(), but for the FC Cases mirror tab --
+    created automatically (with headers) the first time it doesn't exist yet."""
+    try:
+        fc_ws = sh.worksheet(SHEET_TAB_FORECLOSURES)
+    except gspread.WorksheetNotFound:
+        fc_ws = sh.add_worksheet(title=SHEET_TAB_FORECLOSURES, rows=1000, cols=len(SHEET_HEADERS))
+    if not fc_ws.row_values(1):
+        fc_ws.append_row(SHEET_HEADERS, value_input_option="RAW")
+    return fc_ws
+
+
 def get_existing_case_numbers(ws) -> set:
     """Read the whole 'Case Number' column (col A) so we can skip re-adding
     a case that's already in the sheet, and so the resume high-water mark
@@ -235,6 +248,29 @@ def save_to_sheet(ws, row: dict, existing_case_numbers: set):
     ]
     ws.append_row(values, value_input_option="RAW")
     existing_case_numbers.add(row["case_number"])
+
+
+def save_to_foreclosures_sheet(fc_ws, row: dict, existing_fc_case_numbers: set):
+    """Mirrors save_to_sheet(), but only for the FC Cases tab, and only when
+    Type of Case is literally FORECLOSURES. Same append-only / duplicate-skip
+    behavior as the main tab."""
+    if row["type"].strip().upper() != "FORECLOSURES":
+        return
+    if row["case_number"] in existing_fc_case_numbers:
+        return
+
+    values = [
+        row["case_number"],
+        row["type"],
+        row["status"],
+        row["date_filed"],
+        row["defendant_name"],
+        row["plaintiff_name"],
+        row["case_number"],  # Case ID/Link -- site has no stable permalink, case number doubles as the ID/link
+        datetime.date.today().isoformat(),  # Scraped Date
+    ]
+    fc_ws.append_row(values, value_input_option="RAW")
+    existing_fc_case_numbers.add(row["case_number"])
 
 
 MAX_CONSECUTIVE_MISSES = 10
@@ -280,6 +316,11 @@ def walk_from(case_year: str, case_type: str, start_seq: int):
     log_message(f"Writing to Google Sheet '{ws.spreadsheet.title}' / tab '{ws.title}' "
                 f"({len(existing_case_numbers)} case(s) already in it)")
 
+    fc_ws = get_foreclosures_worksheet(ws.spreadsheet)
+    existing_fc_case_numbers = get_existing_case_numbers(fc_ws)
+    log_message(f"Mirroring FORECLOSURES cases to tab '{fc_ws.title}' "
+                f"({len(existing_fc_case_numbers)} case(s) already in it)")
+
     resume_seq = load_high_water_mark_from_sheet(existing_case_numbers, case_year, case_type)
     if resume_seq is not None:
         log_message(f"Resuming from Google Sheet high-water mark: {case_year} {case_type} "
@@ -317,6 +358,7 @@ def walk_from(case_year: str, case_type: str, start_seq: int):
             consecutive_misses = 0
             if result is not None:
                 save_to_sheet(ws, result, existing_case_numbers)
+                save_to_foreclosures_sheet(fc_ws, result, existing_fc_case_numbers)
                 found += 1
                 log_message(f"✅ [{checked}] {case_seq} | {result['type']} | {result['status']} | {result['date_filed']}")
         last_completed_seq = seq
